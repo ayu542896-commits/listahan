@@ -1331,5 +1331,150 @@ function backupNudge(){
 askPersist();
 load().then(()=>{updateStoStatus();backupNudge();});
 </script>
+  <script>
+/* ===== WITHDRAW ADD-ON =====
+   Hiwalay na listahan (state.withdrawals). Walang binubura o binabago sa monthly payments.
+   Savings = lahat ng hulog − lahat ng withdrawal. Hindi nito ginagalaw ang utang / Balance Owed. */
+(function(){
+  const fix=()=>{state.withdrawals=state.withdrawals||[];};
+  fix();
+  const _migrate=migrate; migrate=function(){fix();_migrate();};
+  KINDWORD.withdraw='withdrawal';
+
+  const wOf=pid=>(state.withdrawals||[]).filter(w=>w.personId===pid);
+  const wTotal=pid=>wOf(pid).reduce((s,w)=>s+w.amount,0);
+  const savingsOf=pid=>Math.round((totalPaidBy(pid)-wTotal(pid))*100)/100;
+
+  /* Header: Collected = hulog ng taon − withdrawals ng taon */
+  const _rh=renderHeader;
+  renderHeader=function(){
+    _rh();
+    const ppl=state.people.filter(inGroup).map(p=>p.id);
+    const y=(tab==='detail'?yView:mDate.getFullYear());
+    const hy=state.payments.filter(x=>ppl.includes(x.personId)&&x.ym.startsWith(y+'-')).reduce((s,x)=>s+x.amount,0);
+    const wy=(state.withdrawals||[]).filter(w=>ppl.includes(w.personId)&&(w.date||'').startsWith(y+'-')).reduce((s,w)=>s+w.amount,0);
+    $('hTotal').textContent=peso(hy-wy);
+  };
+
+  /* Members tab: ipakita ang savings (bawas na ang withdrawal) */
+  const _rhu=renderHulog;
+  renderHulog=function(){
+    _rhu();
+    document.querySelectorAll('#hulogList .person[data-person]').forEach(el=>{
+      const r=el.querySelector('.p-right'); if(!r)return;
+      r.querySelector('small').textContent='Savings';
+      r.querySelector('.amt').textContent=peso(savingsOf(el.dataset.person));
+    });
+  };
+  $('searchH').oninput=()=>renderHulog();
+
+  /* Member profile: Withdraw card */
+  const CARD=`<div id="wdCard">
+    <div class="section-title u">Withdraw</div>
+    <div class="card"><div class="payrow" style="border-top:none">
+      <label class="prl">Withdraw from savings</label>
+      <div class="amtwrap">
+        <span class="pfx">₱</span>
+        <input class="amtin" id="wdAmt" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
+        <input class="datein" id="wdDate" type="date">
+      </div>
+      <button class="addloan" id="wdFull" style="margin-top:8px">Withdraw FULL amount</button>
+      <input class="inp" id="wdNote" type="text" placeholder="Note (optional)" autocomplete="off" style="margin-top:8px">
+      <button class="savebtn wide" id="wdSave" style="background:var(--red);box-shadow:0 3px 0 #97281c">Save withdrawal</button>
+      <div class="status" id="wdHint"></div>
+      <div id="wdList"></div>
+    </div></div>
+  </div>`;
+
+  function doFull(){
+    const a=savingsOf(currentPersonId);
+    if(a<=0){toast('Walang mawi-withdraw.');return;}
+    $('wdAmt').value=fmtMoneyInput(String(a));
+  }
+  function doSave(){
+    const p=personById(currentPersonId); if(!p)return;
+    fix();
+    const val=numVal($('wdAmt')), avail=savingsOf(p.id);
+    if(!val||val<=0){toast('Enter the amount to withdraw.');return;}
+    if(val>avail){toast('Sobra — available lang ay '+peso(avail)+'.');return;}
+    const full=val===avail, left=Math.round((avail-val)*100)/100;
+    if(!confirm('Withdraw '+peso(val)+(full?' (FULL)':'')+' for '+p.name+'?\n\nSavings left: '+peso(left)))return;
+    const rec={id:uid(),personId:p.id,amount:val,date:$('wdDate').value||today(),note:$('wdNote').value.trim(),full};
+    state.withdrawals.push(rec);
+    logIt('add','withdraw',p.name,val,(full?'FULL · ':'')+'dated '+fmtDate(rec.date)+(rec.note?' · '+rec.note:'')+' · left '+peso(left),null);
+    save(); $('wdAmt').value=''; $('wdNote').value=''; $('wdAmt').blur(); render();
+    boom('Withdrawn!',p.name+' · '+peso(val)+' · Left '+peso(left));
+  }
+  function removeW(wid){
+    fix();
+    const w=state.withdrawals.find(x=>x.id===wid); if(!w)return;
+    if(!confirm('Delete the withdrawal of '+peso(w.amount)+' on '+fmtDate(w.date)+'?\n\nBabalik ito sa savings.'))return;
+    state.withdrawals=state.withdrawals.filter(x=>x.id!==wid);
+    logIt('del','withdraw',nameOf(w.personId),w.amount,'dated '+fmtDate(w.date)+(w.note?' · '+w.note:''),Object.assign({},w));
+    save(); render(); toast('Deleted — nasa History, pwedeng ibalik.');
+  }
+  document.addEventListener('click',e=>{
+    const dw=e.target.closest&&e.target.closest('[data-delwd]');
+    if(dw)removeW(dw.dataset.delwd);
+  });
+
+  let lastPid=null;
+  const _rd=renderDetail;
+  renderDetail=function(){
+    _rd();
+    const p=personById(currentPersonId); if(!p||p.member===false)return;
+    if(!$('wdCard')){
+      $('monthlyBlock').insertAdjacentHTML('beforeend',CARD);
+      $('wdFull').onclick=doFull; $('wdSave').onclick=doSave;
+    }
+    if(lastPid!==p.id){lastPid=p.id;$('wdAmt').value='';$('wdNote').value='';$('wdDate').value=today();}
+    if(!$('wdDate').value)$('wdDate').value=today();
+    const lab=$('dTotalPaid').previousElementSibling; if(lab)lab.textContent='Savings Balance';
+    $('dTotalPaid').textContent=peso(savingsOf(p.id));
+    $('wdHint').textContent='Available: '+peso(savingsOf(p.id))+' · Paid in '+peso(totalPaidBy(p.id))+' · Withdrawn '+peso(wTotal(p.id));
+    const wds=wOf(p.id).slice().sort((a,b)=>b.date.localeCompare(a.date));
+    $('wdList').innerHTML=wds.length?'<div class="minihead">Withdrawals made</div>'+wds.map(w=>`<div class="histline"><span>${fmtDate(w.date)}${w.full?' · FULL':''}${w.note?' · '+esc(w.note):''}</span>
+      <span><b style="color:var(--red)">−${peso(w.amount)}</b><button class="minidel" data-delwd="${w.id}">🗑</button></span></div>`).join(''):'';
+  };
+
+  /* History: ibalik ang binurang withdrawal */
+  const _undo=undoDelete;
+  undoDelete=function(lid){
+    const e=(state.log||[]).find(x=>x.id===lid);
+    if(e&&e.act==='del'&&e.kind==='withdraw'&&e.snap&&!e.undone){
+      const s=e.snap; fix();
+      if(!personById(s.personId)){toast('Ibalik muna ang taong ito.');return;}
+      if(state.withdrawals.some(w=>w.id===s.id)){toast('Nandiyan na ito.');return;}
+      state.withdrawals.push(s); e.undone=true;
+      logIt('undo','withdraw',e.name,e.amount,e.detail,null);
+      save();render();renderLog();boom('Restored!',e.name+' · '+peso(e.amount));
+      return;
+    }
+    const was=e&&e.undone;
+    _undo(lid);
+    if(e&&e.kind==='person'&&!was&&e.undone&&e.snap&&e.snap.withdrawals){
+      fix();
+      e.snap.withdrawals.forEach(x=>{if(!state.withdrawals.some(y=>y.id===x.id))state.withdrawals.push(x);});
+      save();render();
+    }
+  };
+
+  /* Pag binura ang tao: isama ang withdrawals niya sa snapshot para maibalik */
+  const _pd=$('psDelete').onclick;
+  $('psDelete').onclick=function(){
+    const pid=editingPersonId;
+    _pd.call(this);
+    if(pid&&!personById(pid)){
+      const mine=wOf(pid); if(!mine.length)return;
+      state.withdrawals=state.withdrawals.filter(w=>w.personId!==pid);
+      const le=state.log.slice().reverse().find(x=>x.act==='del'&&x.kind==='person'&&x.snap&&x.snap.person&&x.snap.person.id===pid);
+      if(le){le.snap.withdrawals=mine;le.detail+=' · '+mine.length+' withdrawals';}
+      save();
+    }
+  };
+
+  try{render();}catch(e){}
+})();
+</script>
 </body>
 </html>
